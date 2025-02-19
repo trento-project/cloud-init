@@ -1,0 +1,37 @@
+#cloud-config
+debug: True
+disable_root: False
+# FIXME: This does not work on Tumbleweed, by they enable it by default anyway 🤷
+#ssh_pwauth: True
+
+users:
+  - default
+  - name: geeko
+    lock_passwd: False
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+
+chpasswd:
+  list: |
+    root:root
+    geeko:geeko
+  expire: False
+
+trento:
+  web:
+    admin:
+      password: long-password-that-rocks-lol
+      user: cloud
+    amqp:
+      url: amqp://example.com
+    api:
+      origin: trento.example.com
+    database:
+      url: ecto://postgres.example.com
+    eventstore:
+      url: ecto://eventstore.example.com
+    secrets:
+      access_token_signer: a-token-idk
+      refresh_token_signer: another-token
+      secret_key_base: super-secret-key
+
+# vim: ft=yaml
