@@ -1,0 +1,190 @@
+#!/bin/sh
+#
+#  launch-vm
+#
+#  Start a Trento VM with cloud-init
+#
+
+set -ue
+
+usage() {
+	cat <<-__EOF__
+		usage:  $(basename "$0") [-h]
+
+		Launch Trento in a VM with cloud-init
+
+		Options:
+		  -h or --help          Show this help
+		  -cloud-init-port port Specifies the port the cloud-init metadata server binds to
+		                        (default: ${opt_cloud_init_port_default})
+		  -cpu n                Specifies the number of logical CPU cores the VM can use
+		                        (default: ${opt_cpu_default})
+		  -fresh                Run with a fresh VM
+		  -gui                  Enables a graphical session
+		  -mem n                Specifies the amount of RAM the VM can use
+		                        (default: ${opt_memory_default})
+		  -no-sshfwd
+		                        Disables SSH host forwarding
+		  -sshfwd-port port     Specifies the host port the VM will bind to
+		                        (default: ${opt_ssh_forwarding_host_port_default})
+	__EOF__
+}
+
+if [ "$(uname -s)" = "Darwin" ]; then
+	host_lcpu="$(sysctl -n hw.logicalcpu)"
+else
+	host_lcpu="$(nproc)"
+fi
+
+opt_cloud_init_port_default="8312"
+opt_cloud_init_port="${opt_cloud_init_port_default}"
+opt_cpu_default=$((host_lcpu / 2 ))
+opt_cpu="${opt_cpu_default}"
+opt_fresh="NO"
+opt_gui="NO"
+opt_memory_default="4G"
+opt_memory="${opt_memory_default}"
+opt_ssh_forwarding="YES"
+opt_ssh_forwarding_host_port_default="2022"
+opt_ssh_forwarding_host_port="${opt_ssh_forwarding_host_port_default}"
+
+while [ "$#" -gt 0 ]; do
+	# $@ is not containing any options after this step
+	opt="$1"
+	shift
+	case "${opt}" in
+		-h)
+			usage
+			exit 0
+			;;
+		-cloud-init-port)
+			opt_cloud_init_port="${1:?argument required}"
+			shift
+			;;
+		-cpu)
+			opt_cpu="${1:?argument required}"
+			shift
+			;;
+		-fresh)
+			opt_fresh="YES"
+			;;
+		-gui)
+			opt_gui="YES"
+			;;
+		-mem)
+			opt_memory="${1:?argument required}"
+			shift
+			;;
+		-no-sshfwd)
+			opt_ssh_forwarding="NO"
+			;;
+		-sshfwd-port)
+			opt_ssh_forwarding_host_port="${1:?argument required}"
+			;;
+		--help)
+			usage
+			exit 0
+			;;
+		--) break ;;
+		-*)
+			usage >&2
+			exit 1
+			;;
+	esac
+done
+
+if [ "${opt_ssh_forwarding}" = "YES" ]; then
+	qemu_opt_ssh_forwarding=",hostfwd=tcp::${opt_ssh_forwarding_host_port}-:22"
+else
+	qemu_opt_ssh_forwarding=""
+fi
+
+if [ "${opt_gui}" = "YES" ]; then
+	# Use the system's default backend
+	qemu_opt_gui=""
+else
+	qemu_opt_gui="-display none"
+fi
+
+image_url="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
+
+[ -d "state" ] || mkdir "state"
+if ! [ -f "state/tumbleweed.qcow2.orig" ]; then
+	echo "Downloading Tumbleweed from https://download.opensuse.org"
+	curl -fL --output state/tumbleweed.qcow2.orig "${image_url}"
+	echo
+	echo "Please verify the download before continuing"
+	echo "See https://get.opensuse.org/tumbleweed/#download for more info"
+	read -r -p "Did you verify the image? [y|N] " ans
+	if [ "${ans}" != "y" ] && [ "${ans}" != "Y" ]; then
+		echo "Please re-run the script"
+		exit 2
+	fi
+	echo
+fi
+
+if [ "${opt_fresh}" = "YES" ] || [ ! -f state/tumbleweed.qcow2 ]; then
+	echo "Preparing a fresh VM"
+	cp state/tumbleweed.qcow2.orig state/tumbleweed.qcow2
+	qemu-img resize state/tumbleweed.qcow2 80G
+	echo
+fi
+
+cloud_init_address="10.0.2.2:${opt_cloud_init_port}"
+if [ "${opt_ssh_forwarding}" = "YES" ]; then
+	ssh_txt="localhost:${opt_ssh_forwarding_host_port}"
+else
+	ssh_txt="${opt_ssh_forwarding}"
+fi
+
+printf "Starting VM (GUI: %s, SSH: %s)\n" "${opt_gui}" "${ssh_txt}"
+printf "Cloud-init is available at http://%s\n" "${cloud_init_address}"
+
+pids=""
+
+python3 -m http.server -d example "${opt_cloud_init_port}" &
+pids="$pids $!"
+
+qemu_opt_accel="kvm"
+[ "$(uname -s)" = "Darwin" ] && qemu_opt_accel="tcg"
+
+qemu-system-x86_64 \
+	${qemu_opt_gui} \
+	-accel "${qemu_opt_accel}" \
+	-device virtio-balloon \
+	-device virtio-net-pci,netdev=hostnet1 \
+	-device virtio-rng-pci \
+	-drive file=state/tumbleweed.qcow2,media=disk,if=virtio \
+	-m "${opt_memory}" \
+	-netdev "user,id=hostnet1${qemu_opt_ssh_forwarding}" \
+	-smbios type=1,serial=ds="nocloud;s=http://${cloud_init_address}/" \
+	-smp "cpus=${opt_cpu}" &
+pids="$pids $!"
+
+slay_children() {
+	has_zombies="NO"
+	for pid in ${pids}; do
+		kill "${pid}" 2>/dev/null
+		ecode="$?"
+		if [ "${ecode}" -gt 0 ] && [ "${ecode}" -lt 127 ]; then
+			has_zombies="YES"
+			echo "Process<$pid> is now a zombie..." 1>&2
+		fi
+	done
+
+	if [ "${has_zombies}" = "YES" ]; then
+		echo "" 1>&2
+		echo "o()xxxx[{::::::::::::::::::>" 1>&2
+		echo "Take this sword to slay them, before you get bitten" 1>&2
+	fi
+}
+
+bye() {
+	echo "Byeeee (^-^)ノシ"
+	slay_children
+}
+
+trap slay_children INT TERM HUP
+trap bye EXIT
+
+wait
