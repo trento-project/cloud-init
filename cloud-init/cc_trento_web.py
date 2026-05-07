@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: SUSE LLC
+# SPDX-License-Identifier: Apache-2.0
+
 """Cloud-init Module for Trento Web"""
 
 import logging
